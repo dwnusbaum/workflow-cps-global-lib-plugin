@@ -38,6 +38,10 @@ import org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition;
 import org.jenkinsci.plugins.workflow.job.WorkflowJob;
 import org.jenkinsci.plugins.workflow.job.WorkflowRun;
 import hudson.scm.ChangeLogSet;
+import hudson.scm.PollingResult;
+import hudson.triggers.SCMTrigger;
+import hudson.util.StreamTaskListener;
+import static org.hamcrest.Matchers.equalTo;
 import org.junit.ClassRule;
 import org.junit.Test;
 import static org.junit.Assert.*;
@@ -131,6 +135,37 @@ public class SCMSourceRetrieverTest {
             assertEquals(0, changeSets.size());
             r.assertLogNotContains("Retrying after 10 seconds", b);
         }
+    }
+
+    @Issue("JENKINS-41497")
+    @Test public void dontIncludeChangesPollingEnabled() throws Exception {
+        // Create and configure shared library.
+        sampleRepo.init();
+        sampleRepo.write("vars/myecho.groovy", "def call() {echo 'something special'}");
+        sampleRepo.git("add", "vars");
+        sampleRepo.git("commit", "--message=init");
+        LibraryConfiguration lc = new LibraryConfiguration("dont_include_changes", new SCMSourceRetriever(new GitSCMSource(null, sampleRepo.toString(), "", "*", "", true)));
+        lc.setIncludeInChangesets(false); // Don't include library changes in changelog.
+        GlobalLibraries.get().setLibraries(Collections.singletonList(lc));
+        // Create Pipeline using shared library.
+        WorkflowJob p = r.jenkins.createProject(WorkflowJob.class, "p");
+        p.addTrigger(new SCMTrigger("H * * * *")); // Configure polling.
+        p.setDefinition(new CpsFlowDefinition("@Library('dont_include_changes@master') import myecho; myecho()", true));
+        // Build the Pipeline
+        WorkflowRun a = r.buildAndAssertSuccess(p);
+        r.assertLogContains("something special", a);
+        // Update the library
+        sampleRepo.write("vars/myecho.groovy", "def call() {echo 'something even more special'}");
+        sampleRepo.git("add", "vars");
+        sampleRepo.git("commit", "--message=shared_library_commit");
+        // Trigger a polling check manually to assert that the Pipeline shouldn't be built based on the polling config.
+        PollingResult pollingResult = p.poll(StreamTaskListener.fromStdout());
+        assertThat(pollingResult.change, equalTo(PollingResult.NO_CHANGES.change));
+        // Rebuild the Pipeline to show that the changes are picked up but not included in the change sets.
+        WorkflowRun b = r.buildAndAssertSuccess(p);
+        r.assertLogContains("something even more special", b);
+        List<ChangeLogSet<? extends ChangeLogSet.Entry>> changeSets = b.getChangeSets();
+        assertEquals(0, changeSets.size());
     }
 
     @Test public void retry() throws Exception {
